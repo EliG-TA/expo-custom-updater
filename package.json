@@ -1,6 +1,12 @@
 {
   "name": "expo-custom-updater",
   "version": "2.0.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts"
+  ]
   "description": "A simple way to handle Expo Application Updates",
   "repository": "https://github.com/umbertoghio/expo-custom-updater.git",
   "homepage": "https://github.com/umbertoghio/expo-custom-updater",
