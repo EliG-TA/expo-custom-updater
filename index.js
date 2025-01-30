@@ -18,33 +18,43 @@ const getUnixEpoch = () => Math.floor(Date.now() / 1000)
 
 export const getUpdateLogs = () => updater.logs
 
+let isUpdating = false;
+
 export const doUpdateIfAvailable = async ({ beforeDownloadCallback, throwUpdateErrors, force } = {}) => {
-  updater.lastTimeCheck = getUnixEpoch()
-
-  if (__DEV__) {
-    log('doUpdateIfAvailable: Unable to update or check for updates in DEV')
-    return false
+  // Prevent multiple simultaneous update checks
+  if (isUpdating) {
+    log('doUpdateIfAvailable: Update already in progress, skipping');
+    return false;
   }
-
+  
   try {
-    log('doUpdateIfAvailable: Checking for updates...')
-    const { isAvailable } = await Updates.checkForUpdateAsync()
+    isUpdating = true;
+    updater.lastTimeCheck = getUnixEpoch();
+    
+    if (__DEV__) {
+      log('doUpdateIfAvailable: Unable to update or check for updates in DEV');
+      return false;
+    }
 
-    log(`doUpdateIfAvailable: Update available? ${isAvailable}`)
-    if (!isAvailable && !force) return false
-
-    log('doUpdateIfAvailable: Fetching Update')
-    beforeDownloadCallback && beforeDownloadCallback()
-    await Updates.fetchUpdateAsync()
-
-    log('updateApp: Update fetched, reloading...')
-    await Updates.reloadAsync()
+    log('doUpdateIfAvailable: Checking for updates...');
+    const { isAvailable } = await Updates.checkForUpdateAsync();
+    log(`doUpdateIfAvailable: Update available? ${isAvailable}`);
+    
+    if (!isAvailable && !force) return false;
+    
+    log('doUpdateIfAvailable: Fetching Update');
+    beforeDownloadCallback && beforeDownloadCallback();
+    await Updates.fetchUpdateAsync();
+    log('updateApp: Update fetched, reloading...');
+    await Updates.reloadAsync();
   } catch (e) {
-    log(`doUpdateIfAvailable: ERROR: ${e.message}`)
-    if (throwUpdateErrors) throw e
-    return false
+    log(`doUpdateIfAvailable: ERROR: ${e.message}`);
+    if (throwUpdateErrors) throw e;
+    return false;
+  } finally {
+    isUpdating = false;
   }
-}
+};
 
 export const useCustomUpdater = ({
   updateOnStartup = true,
@@ -55,34 +65,70 @@ export const useCustomUpdater = ({
   afterCheckCallback = null,
   throwUpdateErrors = false
 } = {}) => {
-  const appState = useRef(AppState.currentState)
-
-  updater.showDebugInConsole = showDebugInConsole
+  const appState = useRef(AppState.currentState);
+  const isInitialMount = useRef(true);
+  updater.showDebugInConsole = showDebugInConsole;
 
   useEffect(() => {
-    // Check for updates on app startup, app will be restarted in case of success
-    updateOnStartup && doUpdateIfAvailable({ beforeDownloadCallback, throwUpdateErrors })
+    let mounted = true;
 
-    const subscription = AppState.addEventListener('change', _handleAppStateChange)
+    const init = async () => {
+      if (updateOnStartup && isInitialMount.current) {
+        isInitialMount.current = false;
+        try {
+          // Add startup flag to prevent infinite loop
+          const result = await doUpdateIfAvailable({ 
+            beforeDownloadCallback, 
+            throwUpdateErrors,
+            isStartup: true 
+          });
+          if (mounted && result === false) {
+            // Only set up app state listener if update wasn't applied
+            const subscription = AppState.addEventListener('change', _handleAppStateChange);
+            return () => {
+              mounted = false;
+              subscription.remove();
+            };
+          }
+        } catch (err) {
+          log(`Init error: ${err.message}`);
+          // Continue with app initialization even if update fails
+        }
+      }
+    };
+
+    init();
+
     return () => {
-      subscription.remove()
-    }
-  }, [])
+      mounted = false;
+    };
+  }, []);
 
   const _handleAppStateChange = async (nextAppState) => {
-    const isBackToApp = appState.current.match(/inactive|background/) && nextAppState === 'active'
-    const isTimeToCheck = (getUnixEpoch() - updater.lastTimeCheck) > minRefreshSeconds
+    const isBackToApp = appState.current.match(/inactive|background/) && nextAppState === 'active';
+    const isTimeToCheck = (getUnixEpoch() - updater.lastTimeCheck) > minRefreshSeconds;
+    appState.current = nextAppState;
 
-    appState.current = nextAppState
-    log(`appStateChangeHandler: AppState: ${appState.current}, NeedToCheckForUpdate? ${isBackToApp && isTimeToCheck}`)
-
+    log(`appStateChangeHandler: AppState: ${appState.current}, NeedToCheckForUpdate? ${isBackToApp && isTimeToCheck}`);
+    
     if (!isTimeToCheck || !isBackToApp) {
-      isBackToApp && !isTimeToCheck && log('appStateChangeHandler: Skip check, within refresh time')
-      return false
+      isBackToApp && !isTimeToCheck && log('appStateChangeHandler: Skip check, within refresh time');
+      return false;
     }
 
-    beforeCheckCallback && beforeCheckCallback()
-    await doUpdateIfAvailable({ beforeDownloadCallback, throwUpdateErrors })
-    afterCheckCallback && afterCheckCallback()
-  }
-}
+    beforeCheckCallback && beforeCheckCallback();
+    await doUpdateIfAvailable({ beforeDownloadCallback, throwUpdateErrors });
+    afterCheckCallback && afterCheckCallback();
+  };
+};
+
+const UPDATE_STATUS = {
+  IDLE: 'idle',
+  CHECKING: 'checking',
+  DOWNLOADING: 'downloading',
+  RELOADING: 'reloading',
+  ERROR: 'error'
+};
+
+let currentUpdateStatus = UPDATE_STATUS.IDLE;
+export const getUpdateStatus = () => currentUpdateStatus;
